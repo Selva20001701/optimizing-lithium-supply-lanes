@@ -1,0 +1,2 @@
+"total_shipments","total_lanes","total_carriers","first_shipment_date","last_shipment_date","total_quoted_spend","total_actual_spend","total_cost_leakage","avg_quoted_cost","avg_actual_cost","avg_weight_lbs","avg_utilization","overall_otif_rate","overall_exception_rate"
+"3980","12","4","2024-04-01","2026-03-31","10581744.19","10735379.25","153635.06","2658.73","2697.33","18190","0.76","0.9070","0.0864"

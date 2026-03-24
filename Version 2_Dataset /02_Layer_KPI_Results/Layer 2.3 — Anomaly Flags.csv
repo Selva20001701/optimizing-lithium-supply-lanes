@@ -1,0 +1,5 @@
+"carrier_id","carrier_name","total_shipments","anomalous_shipments","anomaly_rate_pct","cost_anomalies","transit_anomalies"
+"C04","Velocity Haul","729","121","16.60","10","71"
+"C01","Apex Freight","1043","83","7.96","1","56"
+"C02","Titan Logistics","1170","81","6.92","69","18"
+"C03","BlueRoute Transport","1038","38","3.66","3","22"

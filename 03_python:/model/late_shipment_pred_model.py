@@ -61,7 +61,6 @@ print()
 # =============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-print(f"PROJECT_ROOT:{PROJECT_ROOT}")
 OUTPUT_DIR = PROJECT_ROOT / "04_outputs:"
 MODEL_DIR = PROJECT_ROOT / "04_outputs:" / "model_artifacts"
 INPUT_FILE = OUTPUT_DIR / "synthetic_shipments_24m.csv"
@@ -513,6 +512,10 @@ if SHAP_AVAILABLE:
         shap_late = shap_values[1]
     else:
         shap_late = shap_values
+
+    # Handle 3D array (some models return shape: samples x features x classes)
+    if shap_late.ndim == 3:
+        shap_late = shap_late[:, :, 1]  # Take class 1 (late) SHAP values
 
     # --- 11A: Global SHAP summary ---
     shap_global = pd.DataFrame({

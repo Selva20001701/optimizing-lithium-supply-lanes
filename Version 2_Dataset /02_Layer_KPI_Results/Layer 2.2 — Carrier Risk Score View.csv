@@ -1,0 +1,5 @@
+"carrier_id","carrier_name","carrier_profile","total_shipments","lanes_served","total_spend","avg_actual_cost","otif_rate","exception_rate","avg_leakage","total_leakage","avg_utilization","avg_transit_variance","delay_rate","service_risk","control_risk","cost_risk","reliability_risk","carrier_risk_score","carrier_risk_rank","carrier_risk_band"
+"C04","Velocity Haul","Exception-Prone Carrier","729","12","1943833.37","2666.44","0.8093","0.1276","69.87","50937.47","0.76","0.27","0.1907","0.1907","0.1276","1.0000","0.1907","0.3773","1","High Risk"
+"C01","Apex Freight","Low Cost / Lower Reliability","1043","12","2609919.15","2502.32","0.8782","0.0892","44.76","46686.88","0.77","0.12","0.1218","0.1218","0.0892","0.6406","0.1218","0.2434","2","High Risk"
+"C03","BlueRoute Transport","Balanced Performer","1038","12","2792605.78","2690.37","0.9412","0.0713","32.55","33787.85","0.76","-0.01","0.0588","0.0588","0.0713","0.4659","0.0588","0.1637","3","Medium Risk"
+"C02","Titan Logistics","Premium / High Reliability","1170","12","3389020.95","2896.60","0.9632","0.0718","18.99","22222.86","0.76","-0.04","0.0368","0.0368","0.0718","0.2718","0.0368","0.1043","4","Low Risk"

@@ -1,14 +1,20 @@
 """
 =============================================================================
-Synthetic Shipment Dataset Generator
+Synthetic Shipment Dataset Generator — v2 (ML-Optimized)
 Project: Optimizing Lithium Supply Lanes
          Truck Freight Cost, Service, and Carrier Performance
 =============================================================================
 
-This script generates a 24-month historical shipment-level dataset using
-three reference files (lane_master, carrier_master, shipment_logic) as inputs.
-
-The output is a clean CSV ready for PostgreSQL import and Tableau analysis.
+v2 Changes from v1:
+  - Delay probability now driven systematically by features:
+    * carrier profile (strong effect)
+    * lane distance (compounding effect)
+    * utilization (low util = higher delay risk)
+    * weight extremes (very heavy or very light = higher risk)
+    * seasonal patterns (winter months = higher delays)
+    * cost-delay correlation (cost overruns correlate with delays)
+  - All columns, lane IDs, carrier IDs, and structure are IDENTICAL to v1
+  - SQL queries, Layer 2 views, and Layer 3 script need NO changes
 
 Author: [Your Name]
 Date: March 2026
@@ -25,21 +31,19 @@ warnings.filterwarnings('ignore')
 # CONFIGURATION
 # =============================================================================
 
-# File paths — reference files live in 02_reference, output goes to 04_outputs
-REFERENCE_DIR = Path("02_reference:")
-OUTPUT_DIR = Path("04_outputs:")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+REFERENCE_DIR = PROJECT_ROOT / "02_reference:"
+OUTPUT_DIR = PROJECT_ROOT / "04_outputs:"
 
 LANE_MASTER_FILE = REFERENCE_DIR / "lane_master.xlsx"
 CARRIER_MASTER_FILE = REFERENCE_DIR / "carrier_master.xlsx"
 SHIPMENT_LOGIC_FILE = REFERENCE_DIR / "shipment_logic.xlsx"
 OUTPUT_FILE = OUTPUT_DIR / "synthetic_shipments_24m.csv"
 
-# Time range: 24 months ending March 2026
 START_YEAR = 2024
 START_MONTH = 4
 NUM_MONTHS = 24
 
-# Random seed for reproducibility
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
@@ -56,8 +60,6 @@ lane_master = pd.read_excel(LANE_MASTER_FILE)
 carrier_master = pd.read_excel(CARRIER_MASTER_FILE)
 shipment_logic = pd.read_excel(SHIPMENT_LOGIC_FILE)
 
-# Standardize column names — strip whitespace and lowercase
-# Prevents silent mismatches from trailing spaces or capitalization
 lane_master.columns = lane_master.columns.str.strip().str.lower()
 carrier_master.columns = carrier_master.columns.str.strip().str.lower()
 shipment_logic.columns = shipment_logic.columns.str.strip().str.lower()
@@ -76,7 +78,6 @@ print("=" * 60)
 print("SECTION 2: Validating reference files...")
 print("=" * 60)
 
-# Check that lane IDs match across lane_master and shipment_logic
 lane_ids_master = set(lane_master['lane_id'])
 lane_ids_logic = set(shipment_logic['lane_id'])
 
@@ -87,11 +88,10 @@ if lane_ids_master != lane_ids_logic:
         print(f"  WARNING: Lanes in master but missing in logic: {missing_in_logic}")
     if missing_in_master:
         print(f"  WARNING: Lanes in logic but missing in master: {missing_in_master}")
-    raise ValueError("Lane IDs do not match across reference files. Fix before proceeding.")
+    raise ValueError("Lane IDs do not match across reference files.")
 else:
     print("  PASS: Lane IDs match across lane_master and shipment_logic")
 
-# Check for missing values in critical columns
 critical_lane_cols = ['lane_id', 'origin_state', 'destination_state', 'assumed_distance_miles']
 critical_carrier_cols = ['carrier_id', 'carrier_name', 'base_cost_index', 'base_otif_index', 'base_exception_index']
 critical_logic_cols = ['lane_id', 'monthly_shipment_base', 'avg_weight_lbs', 'base_cost_per_mile',
@@ -99,23 +99,20 @@ critical_logic_cols = ['lane_id', 'monthly_shipment_base', 'avg_weight_lbs', 'ba
 
 for col in critical_lane_cols:
     if lane_master[col].isnull().any():
-        raise ValueError(f"Missing values found in lane_master column: {col}")
+        raise ValueError(f"Missing values in lane_master: {col}")
 
 for col in critical_carrier_cols:
     if carrier_master[col].isnull().any():
-        raise ValueError(f"Missing values found in carrier_master column: {col}")
+        raise ValueError(f"Missing values in carrier_master: {col}")
 
 for col in critical_logic_cols:
     if shipment_logic[col].isnull().any():
-        raise ValueError(f"Missing values found in shipment_logic column: {col}")
+        raise ValueError(f"Missing values in shipment_logic: {col}")
 
 print("  PASS: No missing values in critical columns")
 
-# Validate carrier allocation caps are reasonable
-# NOTE: allocation_cap_pct values are used as relative weights for probabilistic
-# assignment, not as strict caps. This is weighted assignment, not cap enforcement.
 total_cap = carrier_master['allocation_cap_pct'].sum()
-print(f"  INFO: Total carrier allocation cap sum = {total_cap:.2f} (used as relative weights, not strict caps)")
+print(f"  INFO: Total carrier allocation cap sum = {total_cap:.2f} (used as relative weights)")
 print("  PASS: All validations passed")
 print()
 
@@ -128,9 +125,7 @@ print("=" * 60)
 print("SECTION 3: Merging reference data...")
 print("=" * 60)
 
-# Merge lane_master with shipment_logic on lane_id
 lane_config = lane_master.merge(shipment_logic, on='lane_id', how='inner')
-
 print(f"  Merged lane config: {len(lane_config)} rows")
 print()
 
@@ -143,9 +138,6 @@ print("=" * 60)
 print("SECTION 4: Building carrier assignment weights...")
 print("=" * 60)
 
-# Use allocation_cap_pct as relative weights for probabilistic assignment
-# This means Titan Logistics (0.40) gets proportionally more volume,
-# Velocity Haul (0.25) gets less — reflecting real-world carrier trust levels
 carrier_weights = carrier_master['allocation_cap_pct'].values
 carrier_weights_normalized = carrier_weights / carrier_weights.sum()
 
@@ -153,39 +145,64 @@ carrier_ids = carrier_master['carrier_id'].values
 carrier_names = carrier_master['carrier_name'].values
 carrier_profiles = carrier_master['carrier_profile'].values
 
-print("  Carrier assignment probabilities (weighted, not capped):")
+print("  Carrier assignment probabilities (weighted):")
 for i, cid in enumerate(carrier_ids):
     print(f"    {cid} ({carrier_names[i]}): {carrier_weights_normalized[i]:.2%}")
 print()
 
 
 # =============================================================================
-# SECTION 5: GENERATE SHIPMENT RECORDS
+# SECTION 5: GENERATE SHIPMENT RECORDS (v2 — ML-OPTIMIZED)
 # =============================================================================
 
 print("=" * 60)
-print("SECTION 5: Generating shipment records...")
+print("SECTION 5: Generating shipment records (v2 — ML-optimized)...")
 print("=" * 60)
 
-# Build a lookup dictionary for carrier-level attributes
 carrier_lookup = carrier_master.set_index('carrier_id').to_dict('index')
+
+# --- v2: Carrier delay multipliers (strong effect) ---
+# These create clear, learnable differences between carriers
+carrier_delay_multiplier = {
+    'C01': 1.4,    # Apex Freight — cheap but higher delay risk
+    'C02': 0.4,    # Titan Logistics — premium, very reliable
+    'C03': 0.8,    # BlueRoute — balanced
+    'C04': 2.0,    # Velocity Haul — exception-prone, highest delay risk
+}
+
+# --- v2: Seasonal delay multipliers ---
+# Winter and peak months have more delays
+seasonal_multiplier = {
+    1: 1.6,   # January — winter
+    2: 1.5,   # February — winter
+    3: 1.2,   # March — transition
+    4: 0.8,   # April — mild
+    5: 0.7,   # May — best conditions
+    6: 0.8,   # June — mild
+    7: 1.0,   # July — summer heat
+    8: 1.1,   # August — summer heat
+    9: 0.9,   # September — mild
+    10: 1.0,  # October — normal
+    11: 1.3,  # November — pre-winter + holiday freight surge
+    12: 1.7,  # December — winter + holiday peak
+}
+
+# --- v2: Distance normalization for compounding risk ---
+max_distance = lane_config['assumed_distance_miles'].max()
 
 all_shipments = []
 shipment_counter = 0
 
-# Loop through each month in the 24-month window
 for month_offset in range(NUM_MONTHS):
     year = START_YEAR + (START_MONTH + month_offset - 1) // 12
     month = (START_MONTH + month_offset - 1) % 12 + 1
     quarter = (month - 1) // 3 + 1
 
-    # Determine number of days in this month for date distribution
     if month == 12:
         days_in_month = (pd.Timestamp(year + 1, 1, 1) - pd.Timestamp(year, month, 1)).days
     else:
         days_in_month = (pd.Timestamp(year, month + 1, 1) - pd.Timestamp(year, month, 1)).days
 
-    # Loop through each lane
     for _, lane in lane_config.iterrows():
         lane_id = lane['lane_id']
         origin_state = lane['origin_state']
@@ -199,7 +216,6 @@ for month_offset in range(NUM_MONTHS):
         strategic_priority = lane['strategic_priority']
         priority_flag = lane['priority_flag']
 
-        # Shipment logic parameters
         monthly_base = lane['monthly_shipment_base']
         avg_weight = lane['avg_weight_lbs']
         weight_var_pct = lane['weight_variation_pct']
@@ -209,22 +225,19 @@ for month_offset in range(NUM_MONTHS):
         exception_pct = lane['invoice_exception_pct']
         avg_util = lane['avg_utilization_pct']
 
-        # Add slight monthly volume variation (+/- 15%)
+        # Monthly volume variation (+/- 15%)
         num_shipments = max(1, int(np.random.normal(monthly_base, monthly_base * 0.15)))
 
-        # Generate shipments for this lane-month
         for _ in range(num_shipments):
             shipment_counter += 1
             shipment_id = f"SH{shipment_counter:06d}"
 
             # --- Shipment Date ---
-            # Distribute randomly across the month
             day = np.random.randint(1, days_in_month + 1)
             shipment_date = pd.Timestamp(year, month, day)
             month_name = shipment_date.strftime('%B')
 
             # --- Carrier Assignment ---
-            # Probabilistic based on allocation weights
             carrier_idx = np.random.choice(len(carrier_ids), p=carrier_weights_normalized)
             carrier_id = carrier_ids[carrier_idx]
             carrier_name = carrier_names[carrier_idx]
@@ -232,70 +245,140 @@ for month_offset in range(NUM_MONTHS):
             carrier_data = carrier_lookup[carrier_id]
 
             # --- Weight ---
-            # Normal distribution around lane average with lane-specific variation
             weight_lbs = max(2000, np.random.normal(avg_weight, avg_weight * weight_var_pct))
             weight_lbs = round(weight_lbs, 0)
 
+            # --- Utilization ---
+            utilization_pct = np.random.normal(avg_util, 0.06)
+            utilization_pct = round(np.clip(utilization_pct, 0.40, 1.00), 2)
+
             # --- Quoted Cost ---
-            # Base formula: distance * base_cost_per_mile * carrier_cost_index
-            # Add slight random noise (+/- 5%)
             carrier_cost_idx = carrier_data['base_cost_index']
             quoted_cost = distance_miles * base_cpm * carrier_cost_idx
             quoted_cost *= np.random.uniform(0.95, 1.05)
             quoted_cost = round(max(200, quoted_cost), 2)
 
-            # --- Actual Cost ---
-            # Quoted cost + variation influenced by carrier exception tendency
-            # Higher exception carriers tend to have more cost overruns
+            # =============================================================
+            # v2: SYSTEMATIC DELAY PROBABILITY
+            # =============================================================
+            # Instead of a flat random coin flip, delay probability is now
+            # driven by compounding factors the model can learn from.
+            #
+            # Base delay risk comes from the lane's delay_risk_pct,
+            # then multiplied by:
+            #   1. Carrier reliability (strong effect: 0.4x to 2.0x)
+            #   2. Distance factor (longer = riskier, up to 1.5x)
+            #   3. Seasonal factor (winter/peak = riskier, up to 1.7x)
+            #   4. Utilization factor (very low or very high = riskier)
+            #   5. Weight factor (extreme weights = riskier)
+            # =============================================================
+
+            # Factor 1: Carrier delay multiplier (strong, learnable)
+            carrier_delay_factor = carrier_delay_multiplier[carrier_id]
+
+            # Factor 2: Distance compounding (longer haul = more risk)
+            distance_factor = 0.7 + (distance_miles / max_distance) * 0.8
+            # Range: ~0.8 for shortest lane to ~1.5 for longest lane
+
+            # Factor 3: Seasonal effect
+            season_factor = seasonal_multiplier[month]
+
+            # Factor 4: Utilization effect
+            # Both very low (<55%) and very high (>95%) utilization increase risk
+            if utilization_pct < 0.55:
+                util_factor = 1.4  # Poorly planned load
+            elif utilization_pct > 0.93:
+                util_factor = 1.3  # Overloaded
+            elif utilization_pct < 0.65:
+                util_factor = 1.15  # Below average
+            else:
+                util_factor = 0.85  # Well-utilized, lower risk
+
+            # Factor 5: Weight extreme effect
+            weight_z = abs(weight_lbs - avg_weight) / (avg_weight * weight_var_pct + 1)
+            if weight_z > 2.0:
+                weight_factor = 1.3  # Extreme weight = higher risk
+            elif weight_z > 1.0:
+                weight_factor = 1.1  # Moderate deviation
+            else:
+                weight_factor = 0.9  # Normal range
+
+            # Combined delay probability
+            effective_delay_prob = (
+                delay_risk
+                * carrier_delay_factor
+                * distance_factor
+                * season_factor
+                * util_factor
+                * weight_factor
+            )
+
+            # Clamp between 2% and 65%
+            effective_delay_prob = np.clip(effective_delay_prob, 0.02, 0.65)
+
+            # --- Actual Transit Days ---
+            if np.random.random() < effective_delay_prob:
+                # Delay occurs — severity also influenced by factors
+                if effective_delay_prob > 0.40:
+                    delay_days = np.random.choice([2, 3, 4], p=[0.35, 0.40, 0.25])
+                elif effective_delay_prob > 0.25:
+                    delay_days = np.random.choice([1, 2, 3], p=[0.40, 0.40, 0.20])
+                else:
+                    delay_days = np.random.choice([1, 2, 3], p=[0.60, 0.30, 0.10])
+                actual_transit_days = planned_transit + delay_days
+            else:
+                if np.random.random() < 0.12:
+                    actual_transit_days = max(1, planned_transit - 1)
+                else:
+                    actual_transit_days = planned_transit
+
+            # --- On-Time Flag ---
+            on_time_flag = 1 if actual_transit_days <= planned_transit else 0
+
+            # =============================================================
+            # v2: COST-DELAY CORRELATION
+            # =============================================================
+            # Late shipments tend to also have cost overruns — this creates
+            # a realistic correlation between operational issues
+            # =============================================================
+
             carrier_exception_idx = carrier_data['base_exception_index']
-            cost_variation_factor = np.random.normal(1.0, 0.03 + carrier_exception_idx * 0.5)
-            # Occasionally add larger overruns for exception-prone scenarios
+            cost_variation_factor = np.random.normal(1.0, 0.03 + carrier_exception_idx * 0.4)
+
+            if on_time_flag == 0:
+                # Late shipments have higher cost overruns
+                cost_variation_factor += np.random.uniform(0.03, 0.15)
+
             if np.random.random() < carrier_exception_idx:
-                cost_variation_factor += np.random.uniform(0.02, 0.12)
+                cost_variation_factor += np.random.uniform(0.02, 0.10)
+
             actual_cost = quoted_cost * cost_variation_factor
             actual_cost = round(max(200, actual_cost), 2)
 
             # --- Cost Leakage ---
             cost_leakage_amount = round(actual_cost - quoted_cost, 2)
 
-            # --- Planned Transit Days ---
-            planned_transit_days = planned_transit
+            # =============================================================
+            # v2: INVOICE EXCEPTION CORRELATION
+            # =============================================================
+            # Exception probability increases when shipment is late or
+            # has cost overruns — mirrors real-world behavior
+            # =============================================================
 
-            # --- Actual Transit Days ---
-            # Combines lane delay_risk with carrier OTIF index
-            # Higher OTIF carriers reduce the effective delay probability
-            carrier_otif_idx = carrier_data['base_otif_index']
-            otif_adjustment = (carrier_otif_idx - 0.85) * 2  # Normalizes around baseline
-            effective_delay_risk = max(0.01, delay_risk * (1 - otif_adjustment))
+            base_exception_prob = exception_pct + carrier_exception_idx * 0.2
 
-            if np.random.random() < effective_delay_risk:
-                # Delay occurs: add 1-3 extra days
-                delay_days = np.random.choice([1, 2, 3], p=[0.55, 0.30, 0.15])
-                actual_transit_days = planned_transit + delay_days
-            else:
-                # No delay: might even arrive slightly early
-                if np.random.random() < 0.15:
-                    actual_transit_days = max(1, planned_transit - 1)
-                else:
-                    actual_transit_days = planned_transit
+            # Late shipments are more likely to have invoice issues
+            if on_time_flag == 0:
+                base_exception_prob += 0.15
 
-            # --- On-Time Flag ---
-            on_time_flag = 1 if actual_transit_days <= planned_transit_days else 0
+            # High cost leakage increases exception probability
+            if cost_leakage_amount > quoted_cost * 0.08:
+                base_exception_prob += 0.10
 
-            # --- Invoice Exception Flag ---
-            # Combine lane exception rate and carrier exception index
-            # NOTE: using 0.3 multiplier — if output exception rates look too high,
-            # reduce to 0.2: combined_exception_rate = exception_pct + carrier_exception_idx * 0.2
-            combined_exception_rate = exception_pct + carrier_exception_idx * 0.3
-            combined_exception_rate = min(combined_exception_rate, 0.35)  # Cap at 35%
-            invoice_exception_flag = 1 if np.random.random() < combined_exception_rate else 0
+            base_exception_prob = min(base_exception_prob, 0.45)
+            invoice_exception_flag = 1 if np.random.random() < base_exception_prob else 0
 
-            # --- Utilization ---
-            # Normal distribution around lane average, clamped 40%-100%
-            utilization_pct = np.random.normal(avg_util, 0.06)
-            utilization_pct = round(np.clip(utilization_pct, 0.40, 1.00), 2)
-
-            # --- Build Record ---
+            # --- Build Record (IDENTICAL columns to v1) ---
             record = {
                 'shipment_id': shipment_id,
                 'shipment_date': shipment_date,
@@ -317,7 +400,7 @@ for month_offset in range(NUM_MONTHS):
                 'carrier_profile': carrier_profile,
                 'distance_miles': distance_miles,
                 'weight_lbs': weight_lbs,
-                'planned_transit_days': planned_transit_days,
+                'planned_transit_days': planned_transit,
                 'actual_transit_days': actual_transit_days,
                 'quoted_cost': quoted_cost,
                 'actual_cost': actual_cost,
@@ -341,49 +424,35 @@ print("=" * 60)
 print("SECTION 6: Post-processing and quality checks...")
 print("=" * 60)
 
-# Convert to DataFrame
 df = pd.DataFrame(all_shipments)
-
-# Sort by shipment date then shipment ID
 df = df.sort_values(['shipment_date', 'shipment_id']).reset_index(drop=True)
 
-# --- Quality Checks ---
-
-# Check 1: No negative costs
-assert (df['quoted_cost'] > 0).all(), "FAIL: Negative quoted costs found"
-assert (df['actual_cost'] > 0).all(), "FAIL: Negative actual costs found"
+assert (df['quoted_cost'] > 0).all(), "FAIL: Negative quoted costs"
+assert (df['actual_cost'] > 0).all(), "FAIL: Negative actual costs"
 print("  PASS: No negative costs")
 
-# Check 2: No negative weights
-assert (df['weight_lbs'] > 0).all(), "FAIL: Negative weights found"
+assert (df['weight_lbs'] > 0).all(), "FAIL: Negative weights"
 print("  PASS: No negative weights")
 
-# Check 3: Utilization within bounds
 assert (df['utilization_pct'] >= 0.40).all(), "FAIL: Utilization below 40%"
 assert (df['utilization_pct'] <= 1.00).all(), "FAIL: Utilization above 100%"
 print("  PASS: Utilization within 40%-100% bounds")
 
-# Check 4: Actual transit days are positive and realistic
 assert (df['actual_transit_days'] >= 1).all(), "FAIL: Transit days below 1"
-assert (df['actual_transit_days'] <= 15).all(), "FAIL: Unrealistic transit days (>15)"
+assert (df['actual_transit_days'] <= 15).all(), "FAIL: Unrealistic transit days"
 print("  PASS: Transit days within realistic range")
 
-# Check 5: No missing values in critical columns
 critical_output_cols = ['shipment_id', 'shipment_date', 'lane_id', 'carrier_id',
                         'quoted_cost', 'actual_cost', 'on_time_flag']
 for col in critical_output_cols:
     assert df[col].isnull().sum() == 0, f"FAIL: Missing values in {col}"
-print("  PASS: No missing values in critical output columns")
+print("  PASS: No missing values in critical columns")
 
-# Check 6: No duplicate shipment IDs
-assert df['shipment_id'].nunique() == len(df), "FAIL: Duplicate shipment IDs found"
+assert df['shipment_id'].nunique() == len(df), "FAIL: Duplicate shipment IDs"
 print("  PASS: No duplicate shipment IDs")
 
-# Check 7: Date range coverage
 date_range = f"{df['shipment_date'].min().strftime('%Y-%m-%d')} to {df['shipment_date'].max().strftime('%Y-%m-%d')}"
 print(f"  INFO: Date range covered: {date_range}")
-
-# Check 8: Lane and carrier distribution
 print(f"  INFO: Unique lanes: {df['lane_id'].nunique()}")
 print(f"  INFO: Unique carriers: {df['carrier_id'].nunique()}")
 print()
@@ -406,6 +475,43 @@ print(f"  Overall OTIF rate:        {df['on_time_flag'].mean():.2%}")
 print(f"  Invoice exception rate:   {df['invoice_exception_flag'].mean():.2%}")
 print(f"  Avg utilization:          {df['utilization_pct'].mean():.2%}")
 print(f"  Avg weight (lbs):         {df['weight_lbs'].mean():,.0f}")
+
+# --- v2: Delay pattern verification ---
+print("\n  === v2 DELAY PATTERN VERIFICATION ===")
+
+print("\n  Late rate by carrier (should show clear differences):")
+carrier_otif = df.groupby(['carrier_id', 'carrier_name'])['on_time_flag'].agg(['mean', 'count'])
+for (cid, cname), row in carrier_otif.iterrows():
+    late_rate = (1 - row['mean']) * 100
+    print(f"    {cid} ({cname}): {late_rate:.1f}% late ({int(row['count'])} shipments)")
+
+print("\n  Late rate by distance band:")
+df['distance_band'] = pd.cut(df['distance_miles'], bins=[0, 500, 1000, 1500, 2000],
+                              labels=['Short (<500mi)', 'Medium (500-1000mi)',
+                                      'Long (1000-1500mi)', 'Very Long (>1500mi)'])
+dist_otif = df.groupby('distance_band', observed=True)['on_time_flag'].mean()
+for band, otif in dist_otif.items():
+    print(f"    {band}: {(1-otif)*100:.1f}% late")
+
+print("\n  Late rate by season:")
+df['season'] = df['month'].map({12: 'Winter', 1: 'Winter', 2: 'Winter',
+                                 3: 'Spring', 4: 'Spring', 5: 'Spring',
+                                 6: 'Summer', 7: 'Summer', 8: 'Summer',
+                                 9: 'Fall', 10: 'Fall', 11: 'Fall'})
+season_otif = df.groupby('season')['on_time_flag'].mean()
+for season, otif in season_otif.items():
+    print(f"    {season}: {(1-otif)*100:.1f}% late")
+
+print("\n  Late rate by utilization band:")
+df['util_band'] = pd.cut(df['utilization_pct'], bins=[0, 0.55, 0.65, 0.85, 0.93, 1.0],
+                          labels=['Very Low (<55%)', 'Low (55-65%)', 'Normal (65-85%)',
+                                  'High (85-93%)', 'Very High (>93%)'])
+util_otif = df.groupby('util_band', observed=True)['on_time_flag'].mean()
+for band, otif in util_otif.items():
+    print(f"    {band}: {(1-otif)*100:.1f}% late")
+
+# Clean up helper columns before export
+df.drop(columns=['distance_band', 'season', 'util_band'], inplace=True)
 
 print("\n  Shipments by lane:")
 lane_counts = df.groupby('lane_id').size().sort_values(ascending=False)
@@ -437,10 +543,7 @@ print("=" * 60)
 print("SECTION 8: Exporting to CSV...")
 print("=" * 60)
 
-# Ensure output directory exists
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Export
 df.to_csv(OUTPUT_FILE, index=False)
 
 print(f"  Exported: {OUTPUT_FILE}")
@@ -449,5 +552,5 @@ print(f"  Columns:  {len(df.columns)}")
 print(f"  File size: {OUTPUT_FILE.stat().st_size / 1024:.1f} KB")
 print()
 print("=" * 60)
-print("DONE — Dataset generation complete.")
+print("DONE — v2 Dataset generation complete (ML-optimized).")
 print("=" * 60)

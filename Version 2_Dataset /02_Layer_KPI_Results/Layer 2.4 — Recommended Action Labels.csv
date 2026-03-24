@@ -1,0 +1,4 @@
+"performance_quadrant","lane_count","avg_otif","avg_cpm","avg_exception_rate"
+"High Cost / Good Service","3","0.9165","2.73","0.0781"
+"High Cost / Low Service","4","0.7997","3.02","0.1336"
+"Low Cost / Good Service","5","0.9418","2.58","0.0713"
